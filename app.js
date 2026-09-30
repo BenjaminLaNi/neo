@@ -380,6 +380,74 @@ function popMenu(x, y, items, { title = '', from = null } = {}) {
   });
 }
 
+function profilePicker(x, y, profiles) {
+  return new Promise((resolve) => {
+    const menu = document.createElement('div');
+    menu.className = 'profile-picker';
+    menu.setAttribute('role', 'menu');
+    menu.innerHTML = `
+    `;
+    for (const profile of profiles) {
+      const p = document.createElement('div');
+      p.className = currentAuthor().id === profile.id ? 'on' : '';
+      p.textContent = `${profile.name || t('Anonymous')}`;
+      const edit = document.createElement('button');
+      edit.className = 'edit';
+      edit.textContent = "✎"; // edit icon
+      edit.title = t('Rename');
+      edit.onclick = (e) => { e.stopPropagation(); done("rename:" + profile.id); };
+      const remove = document.createElement('button');
+      remove.className = 'remove';
+      remove.textContent = "✕"; // remove icon
+      remove.title = t('Remove');
+      remove.onclick = (e) => { e.stopPropagation(); done("remove:" + profile.id); };
+      p.appendChild(edit);
+      p.appendChild(remove);
+      p.onclick = () => done("sw:" + profile.id);
+      menu.appendChild(p);
+    }
+    const newProfile = document.createElement('div');
+    newProfile.className = 'new-profile';
+    newProfile.innerHTML = `+`;
+    newProfile.title = t('New Pen Name');
+    newProfile.onclick = () => done("add");
+    menu.appendChild(newProfile);
+    document.body.appendChild(menu);
+    const zoom = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+    const w = menu.offsetWidth * zoom;
+    const h = menu.offsetHeight * zoom;
+    const left = Math.max(4, Math.min(x, window.innerWidth - w - 4));
+    const top = y + h > window.innerHeight - 4 ? Math.max(4, y - h) : y;
+    menu.style.left = left / zoom + 'px';
+    menu.style.top = top / zoom + 'px';
+    const done = (value) => {
+      if (!menu.isConnected) return;
+      menu.remove();
+      document.removeEventListener('mousedown', outside, true);
+      window.removeEventListener('blur', cancel);
+      // the Chapters pane it kept open closes if the pointer has left it
+      const nav = $('#nav-pane');
+      if (nav && nav.dataset.pinned !== '1' && !nav.matches(':hover')) nav.classList.remove('open');
+      resolve(value);
+    };
+    const cancel = () => done(null);
+    const outside = (e) => { if (!menu.contains(e.target)) done(null); };
+    document.addEventListener('mousedown', outside, true);
+    window.addEventListener('blur', cancel);
+    menu.addEventListener('keydown', (e) => {
+      const at = buttons.indexOf(document.activeElement);
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(null); }
+      else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const next = buttons[(at + (e.key === 'ArrowDown' ? 1 : buttons.length - 1)) % buttons.length];
+        if (next) next.focus();
+      } else if (e.key === 'Tab') e.preventDefault();
+      e.stopPropagation();
+    });
+    (menu.querySelector('.on') || menu.querySelector('button') || menu).focus({ preventScroll: true });
+  });
+}
+
 // A click (or tap) on the dim page around any dialog dismisses it the way
 // its own quiet button would — Cancel or Later where there is one, else
 // Done/OK. Dialogs that must be answered have neither and stay put.
@@ -2030,8 +2098,8 @@ async function reshelveBook() {
   toast(t('“{title}” is back on the shelf', { title: loose.find((b) => b.id === pick).title }));
 }
 
-$('#author-chip').onclick = async () => {
-  const cur = currentAuthor();
+$('#author-chip').onclick = async (e) => {
+  /*const cur = currentAuthor();
   const opts = [];
   for (const a of library.authors) {
     if (a.id !== cur.id) {
@@ -2047,15 +2115,21 @@ $('#author-chip').onclick = async () => {
       danger: true, value: 'del'
     });
   }
-  const pick = await optionModal(t('Writing as {name}', { name: cur.name }), null, opts);
-  if (!pick) return;
+  const pick = await optionModal(t('Writing as {name}', { name: cur.name }), null, opts);*/
+  const pick = await profilePicker(e.clientX, e.clientY, library.authors);
+  if (!pick || pick == null) return;
   if (pick.startsWith('sw:')) {
     library.currentAuthorId = pick.slice(3);
-  } else if (pick === 'rename') {
-    const name = await askInput(t('Author name'), t('Shown on your title pages'), cur.name);
+  } else if (pick.startsWith('rename:')) {
+    const id = pick.slice(7);
+    const author = library.authors.find((a) => a.id === id);
+    if (!author) return;
+    const name = await askInput(t('Author name'), t('Shown on your title pages'), author.name);
     if (name === null) return;
-    cur.name = name || cur.name;
-    library.authorName = library.authors[0].name; // legacy field follows the first name
+    const oldName = author.name;
+    author.name = name || author.name;
+    library.authorName = library.authors.find((a) => a.id === id).name; // legacy field follows the first name
+    toast(t('{name} renamed to {new}', { name: oldName, new: author.name }));
   } else if (pick === 'add') {
     const name = await askInput(t('New pen name'), t('Shown on that name’s title pages'), '');
     if (!name) return;
@@ -2066,16 +2140,29 @@ $('#author-chip').onclick = async () => {
       id: 'shelf-' + Date.now().toString(36),
       name: t('Works in Progress'), bookIds: [], authorId: a.id
     });
-  } else if (pick === 'del') {
-    const homeId = library.authors[0].id;
-    const rest = library.authors.filter((a) => a.id !== cur.id);
-    const target = rest[0];
-    for (const s of library.shelves) {
-      if ((s.authorId || homeId) === cur.id) s.authorId = target.id;
+  } else if (pick.startsWith('remove:')) {
+    const id = pick.slice(7);
+    const cur = library.authors.find((a) => a.id === id);
+    if (!cur) return;
+    const remove = await optionModal(t('Remove {name}', { name: cur.name }), null, [
+      { label: t('Remove'), desc: t('These shelves and books move to your other name. Nothing is deleted from disk.'), danger: true, value: 'remove' },
+      { label: t('Cancel'), value: 'cancel' }
+    ]);
+    if (!remove) return;
+    if (remove === 'remove') {
+      const homeId = library.authors[0].id;
+      const rest = library.authors.filter((a) => a.id !== cur.id);
+      const target = rest[0];
+      for (const s of library.shelves) {
+        if ((s.authorId || homeId) === id) s.authorId = target.id;
+      }
+      library.authors = rest;
+      library.currentAuthorId = target.id;
+      library.authorName = library.authors[0].name;
+      toast(t('{name} removed, shelves and books moved to {other}', { name: cur.name, other: target.name }));
+      await writeLibrary(library);
+      renderShelves();
     }
-    library.authors = rest;
-    library.currentAuthorId = target.id;
-    library.authorName = library.authors[0].name;
   }
   await writeLibrary(library);
   renderShelves();
